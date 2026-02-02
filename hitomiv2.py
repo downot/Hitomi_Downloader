@@ -210,9 +210,9 @@ class Comic(BaseModel):
     def prevent_characters_none(cls, v):
         if v is None:
             return []
-        return (v
+        return v
 
-    @field_validator('artists', mode='before'))
+    @field_validator('artists', mode='before')
     @classmethod
     def prevent_artists_none(cls, v):
         if v is None:
