@@ -11,6 +11,7 @@ import httpx
 from pydantic import BaseModel, Field, field_validator
 from tqdm import tqdm
 from setup_logger import getLogger, DEBUG_LEVEL, INFO_LEVEL
+import uuid
 
 logger, setLoggerLevel, _ = getLogger('Hitomi')
 
@@ -328,7 +329,8 @@ async def getComic(gallery_id) -> Optional[Comic]:
 
 async def downloadComic(comic: Comic, file: IO[bytes],
                         max_threads=5,
-                        phase_callback: Callable[[str], Awaitable[None]] = None) -> bool:
+                        phase_callback: Callable[[str], Awaitable[None]] = None,
+                        enable_tempfile=True) -> bool:
     if not comic.files:
         logger.warning(f'comic has no files')
         return False
@@ -346,39 +348,52 @@ async def downloadComic(comic: Comic, file: IO[bytes],
         phase_callback = _tqdm_callback
     sem = asyncio.Semaphore(max_threads)
 
-    async def download_file(_sem: asyncio.Semaphore, client: httpx.AsyncClient, url_name: str, url: str) -> tuple[
-        str, tempfile.SpooledTemporaryFile]:
+    async def download_file(_sem: asyncio.Semaphore,
+                            client: httpx.AsyncClient,
+                            file_url: str,
+                            dl_file: IO[bytes]) -> bool:
         async with _sem:
-            response = await robustGet(client, url, header=headers)
-            f = tempfile.SpooledTemporaryFile(max_size=1024 ** 2)
-            f.write(response.content)
-            f.seek(0)
-            await phase_callback(url)
-            return url_name, f
+            response = await robustGet(client, file_url, header=headers)
+            dl_file.write(response.content)
+            await phase_callback(file_url)
+            return True
 
     limits = httpx.Limits(max_keepalive_connections=max_threads, max_connections=max_threads)
-    async with httpx.AsyncClient(
-            proxy=proxy,
-            timeout=5,
-            limits=limits,
-            http2=True  # 如果服务器支持 HTTP/2，速度会起飞 (可选，需安装 httpx[http2])
-    ) as client_o:
-        tasks = [download_file(sem, client_o, name, url) for name, url in file_urls.items()]
-        downloaded_files_data = cast(
-            list[tuple[str, tempfile.SpooledTemporaryFile]],
-            cast(object, await asyncio.gather(*tasks))
-        )
+    fp_list: dict[str, tempfile.SpooledTemporaryFile] = {}
+    try:
+        async with httpx.AsyncClient(
+                proxy=proxy,
+                timeout=5,
+                limits=limits
+        ) as client_o:
+            if enable_tempfile:
+                for name, url in file_urls.items():
+                    fp_list[name] = tempfile.SpooledTemporaryFile(max_size=1024 ** 2)
+            else:
+                for name, url in file_urls.items():
+                    fp_list[name] = tempfile.SpooledTemporaryFile(max_size=0)
+            tasks = []
+            for name, fp in fp_list.items():
+                tasks.append(download_file(sem, client_o, file_urls[name], fp))
+            downloaded_results = cast(
+                list[bool],
+                cast(object, await asyncio.gather(*tasks))
+            )
 
 
-    # 哈希级可复现构建, 勿修改任何打包流程
-    with zipfile.ZipFile(file, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for file_name, file_data in downloaded_files_data:
-            zinfo = zipfile.ZipInfo(file_name, date_time=(1980, 1, 1, 0, 0, 0))
-            zinfo.external_attr = 0o100644 << 16
-            zinfo.compress_type = zipfile.ZIP_DEFLATED
-            zipf.writestr(zinfo, file_data.read())
-    file.seek(0)
-    return True
+        # 哈希级可复现构建, 勿修改任何打包流程
+        with zipfile.ZipFile(file, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for name, file_data in fp_list.items():
+                zinfo = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                zinfo.external_attr = 0o100644 << 16
+                zinfo.compress_type = zipfile.ZIP_DEFLATED
+                file_data.seek(0)
+                zipf.writestr(zinfo, file_data.read())
+        file.seek(0)
+    finally:
+        for fp in fp_list.values():
+            fp.close()
+    return all(downloaded_results)
 
 
 import struct
