@@ -5,7 +5,7 @@
 ![UI](screenshot.jpg)
 
 
-[English](https://github.com/ACBAD/Hitomi_Downloader/blob/master/README_EN.md)
+[English](README_EN.md)
 
 hitomi.la上漫画的搜索和下载的python实现
 
