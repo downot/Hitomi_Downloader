@@ -52,7 +52,9 @@ python hitomiv2.py -s "HayaseYuuka"
 - `-o`, `--output`: 设置下载文件的存储路径。
 - `-p`, `--proxy`: 设置代理地址（例如 `http://127.0.0.1:10809`）。
 
+### Chrome 扩展
 
+打开Chrome开发模式，将 `hitomi-copy-ext` 目录拖放到 [chrome://extensions/](chrome://extensions/) 即可开启ID复制器，可以达到一键复制到 `python hitomiv2.py -d` 后面的参数。
 
 ## 注意事项
 

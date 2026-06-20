@@ -54,7 +54,9 @@ python hitomiv2.py -s "HayaseYuuka"
 - `-o`, `--output`: Set the storage path for downloaded files.
 - `-p`, `--proxy`: Set proxy address (e.g., `http://127.0.0.1:10809`).
 
+### Chrome Extension
 
+I just set up this neat Chrome extension called hitomi-copy-ext. It’s super simple—you just enable developer mode in Chrome, drag the folder into chrome://extensions/, and you're good to go. It lets you copy IDs with a single click so you can paste them right into the python script (python hitomiv2.py -d). It has saved me so much time already!
 
 ## Notes
 
