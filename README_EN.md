@@ -6,6 +6,8 @@ Translation by ChatGPT
 
 # Hitomi.la Downloader
 
+![UI](screenshot.jpg)
+
 A Python implementation for searching and downloading comics from hitomi.la.
 
 Comics on jm have ads, and comics on eh require points to download. This website allows guests to download, but after checking, it seems that there isn't a reverse-engineered solution on GitHub, so I spent some time writing this.
