@@ -17,21 +17,20 @@ CRITICAL_LEVEL = logging.CRITICAL
 def getLogger(module_name: str, log_dir=Path("logs"), debug: bool = False)\
         -> tuple[logging.Logger, Callable[[int], None], Callable[[int], None]]:
     """
-    获取配置好的 Logger 对象
-    :param module_name: 模块名称
-    :param log_dir: 日志目录
-    :param debug: 是否开启控制台调试模式 (True: 显示DEBUG级别, False: 显示INFO级别)
+    Get configured Logger object
+    :param module_name: Module name
+    :param log_dir: Log directory
+    :param debug: Whether to enable console debug mode (True: DEBUG, False: INFO)
     :return: logging.Logger
     """
     logger = logging.getLogger(module_name)
     logger.propagate = False
-    # 1. 关键修改：将总记录器的级别设置为 DEBUG
-    # 这样所有级别的日志才能通过“总闸”，流向后面的 Handler 进行筛选
+    # 1. Set global logger level to DEBUG
     logger.setLevel(logging.DEBUG)
 
     def preventSB(level: int):
-        raise NotImplementedError(f"Logger '{module_name}' 已经被初始化过了，别乱改 Level！")
-    # 防止重复添加 Handler (Jupyter 或 多次调用时常见问题)
+        raise NotImplementedError(f"Logger '{module_name}' already initialized, don't change the Level!")
+    # Prevent adding multiple handlers
     if logger.handlers:
         return logger, preventSB, preventSB
     # 基础格式字符串

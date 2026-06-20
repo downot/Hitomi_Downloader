@@ -1,0 +1,23 @@
+{
+    "manifest_version": 3,
+    "name": "Hitomi ID Copier Pro",
+    "version": "1.1",
+    "description": "精美且高效的 Hitomi ID 提取工具",
+    "icons": {
+        "128": "icon.png"
+    },
+    "permissions": [
+        "clipboardWrite"
+    ],
+    "content_scripts": [
+        {
+            "matches": [
+                "*://hitomi.la/*"
+            ],
+            "js": [
+                "content.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ]
+}

@@ -12,6 +12,15 @@ from pydantic import BaseModel, Field, field_validator
 from tqdm import tqdm
 from setup_logger import getLogger, DEBUG_LEVEL, INFO_LEVEL
 import uuid
+import random
+from rich.live import Live
+from rich.layout import Layout
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
+from rich.console import Console, Group as RichGroup
+from rich.text import Text
+from rich.table import Table
+from collections import deque
 
 logger, setLoggerLevel, _ = getLogger('Hitomi')
 
@@ -36,11 +45,11 @@ debug = False
 
 proxy_var = (os.environ.get('http_proxy', None) or os.environ.get('HTTP_PROXY', None)
              or os.environ.get('HTTPS_PROXY', None) or os.environ.get('https_proxy', None))
-proxy: httpx.Proxy | None = None
+proxy: Optional[httpx.Proxy] = None
 
 if proxy_var:
     proxy = httpx.Proxy(proxy_var)
-    logger.info(f'正在使用代理: {proxy}')
+    logger.info(f'Using proxy: {proxy}')
 
 
 def setProxy(http_proxy_url: str):
@@ -65,7 +74,7 @@ search_cache = {}
 
 
 async def robustGet(client: httpx.AsyncClient, get_url: str, header=None):
-    logger.debug(f'请求 {get_url}')
+    logger.debug(f'Request: {get_url}')
     for itime in range(10):
         try:
             response = await client.get(get_url, headers=header)
@@ -73,11 +82,16 @@ async def robustGet(client: httpx.AsyncClient, get_url: str, header=None):
                 return response
             elif response.status_code == 404:
                 return None
+            elif response.status_code == 503:
+                wait_time = random.uniform(2.0, 5.0) + (itime * 1.5)
+                logger.warning(f'Server returned 503 (Rate limited), triggering safety wait for {wait_time:.1f}s...')
+                await asyncio.sleep(wait_time)
+                continue
             else:
                 if itime > 2:
-                    logger.warning(f'服务器返回{response.status_code}, 当前次数 {itime}')
+                    logger.warning(f'Server returned {response.status_code}, Attempt {itime}')
         except Exception as e:
-            logger.warning(f'请求错误: {type(e)}:{e}')
+            logger.warning(f'Request error: {type(e)}:{e}')
         await asyncio.sleep(0.5 * (itime + 1))
     return None
 
@@ -234,6 +248,7 @@ class Comic(BaseModel):
 
 
 async def decodeDownloadUrls(files: list[PageInfo]) -> dict[str, str]:
+    logger.info(f"Decoding download URLs for {len(files)} files")
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=5)
     async with httpx.AsyncClient(
             proxy=proxy,
@@ -270,6 +285,7 @@ async def decodeDownloadUrls(files: list[PageInfo]) -> dict[str, str]:
         image_name = re.sub(r'\.[^.]+$', '.webp', file.name)
         # 传入 Pydantic 对象 file
         download_urls[image_name] = url2hash(0, file, None)
+    logger.debug(f"Successfully decoded {len(download_urls)} links")
     return download_urls
 
 
@@ -324,13 +340,16 @@ async def getComic(gallery_id) -> Optional[Comic]:
         galleryinfo_dict = json.loads(json_str)
     except json.JSONDecodeError as e:
         raise ValueError(f"Error decoding JSON: {e}")
-    return Comic.model_validate(galleryinfo_dict)
+    comic = Comic.model_validate(galleryinfo_dict)
+    logger.info(f"Successfully fetched Comic info: [{comic.id}] {comic.title}")
+    return comic
 
 
 async def downloadComic(comic: Comic, file: IO[bytes],
                         max_threads=5,
                         phase_callback: Callable[[str], Awaitable[None]] = None,
                         enable_tempfile=True) -> bool:
+    logger.info(f"Starting Comic download: [{comic.id}] {comic.title}")
     if not comic.files:
         logger.warning(f'comic has no files')
         return False
@@ -338,11 +357,13 @@ async def downloadComic(comic: Comic, file: IO[bytes],
     pbar: Optional[tqdm] = None
     file_urls = await decodeDownloadUrls(comic.files)
     if phase_callback is None:
-        pbar = tqdm(total=len(file_urls), desc="Downloading", unit="file")
+        # 如果没有传入 callback，我们仍然需要一个进度条
+        pbar = tqdm(total=len(file_urls), desc=f"Downloading {comic.id}", unit="file", leave=False)
 
     # noinspection PyUnusedLocal
     async def _tqdm_callback(dl_url: str):
-        pbar.update(1)
+        if pbar:
+            pbar.update(1)
 
     if phase_callback is None:
         phase_callback = _tqdm_callback
@@ -393,7 +414,9 @@ async def downloadComic(comic: Comic, file: IO[bytes],
     finally:
         for fp in fp_list.values():
             fp.close()
-    return all(downloaded_results)
+    success = all(downloaded_results)
+    logger.info(f"Comic [{comic.id}] 下载完成, 状态: {'成功' if success else '失败'}")
+    return success
 
 
 import struct
@@ -562,9 +585,9 @@ async def search_single_term(client: httpx.AsyncClient, term: str) -> set[int]:
 
 async def searchIDs(query: str, max_threads: int = 5) -> list[int]:
     """
-        主搜索入口 (全并行优化版)
+        Main search entry point (Full parallel optimized version)
         """
-    logger.info(f"搜索: {query}")
+    logger.info(f"Search: {query}")
     terms = query.lower().strip().split()
     positive_terms = []
     negative_terms = []
@@ -653,15 +676,249 @@ async def searchIDs(query: str, max_threads: int = 5) -> list[int]:
                 if current_ids:
                     current_ids.difference_update(res)
     # 排序结果 (ID 越大越新)
-    return sorted(list(current_ids), reverse=True)
+    result = sorted(list(current_ids), reverse=True)
+    logger.info(f"Search complete, found {len(result)} results")
+    return result
 
 
-async def cliDownload(comic_list: list[int]):
+class TaskStatus:
+    def __init__(self, comic_id: int):
+        self.comic_id = comic_id
+        self.title = str(comic_id)
+        self.total = 0
+        self.completed = 0
+        self.state = "Waiting"
+        self.msg = ""
+        self.logs = deque(maxlen=5)
+        self.worker_idx = None
+        self.countdown_total = 0
+        self.countdown_current = 0
+
+    def log(self, message: str):
+        self.logs.append(message)
+
+    def update(self, completed: int = None, msg: str = None, state: str = None):
+        if completed is not None:
+            self.completed = completed
+        if msg is not None:
+            self.msg = msg
+        if state is not None:
+            self.state = state
+
+
+class TUIManager:
+    def __init__(self, comic_ids: list[int]):
+        self.comic_ids = comic_ids
+        self.tasks = {cid: TaskStatus(cid) for cid in comic_ids}
+        self.global_logs = deque(maxlen=15)
+        self.console = Console()
+        self.layout = Layout()
+        self.setup_layout()
+
+    def get_task(self, comic_id: int) -> TaskStatus:
+        return self.tasks[comic_id]
+
+    def setup_layout(self):
+        self.layout.split_column(
+            Layout(name="header", size=3),
+            Layout(name="body", ratio=1),
+            Layout(name="footer", size=10),
+        )
+        self.layout["body"].split_row(
+            Layout(name="left_panel", ratio=1),
+            Layout(name="right_panel", ratio=2),
+        )
+
+    def log(self, message: str):
+        self.global_logs.append(message)
+
+    def make_header(self) -> Panel:
+        completed = sum(1 for t in self.tasks.values() if t.state in ("Completed", "Failed"))
+        total = len(self.comic_ids)
+        grid = Table.grid(expand=True)
+        grid.add_column(justify="left", ratio=1)
+        grid.add_column(justify="right", ratio=1)
+        grid.add_row(
+            Text.from_markup(f"[bold blue]Hitomi Downloader[/] [white]v2.0[/]"),
+            Text.from_markup(f"[bold green]Total Progress: {completed}/{total}[/]"),
+        )
+        return Panel(grid, style="white on blue")
+
+    def make_queue_panel(self) -> Panel:
+        waiting = [str(t.comic_id) for t in self.tasks.values() if t.state == "Waiting"]
+        completed = [str(t.comic_id) + ("(Success)" if t.state == "Completed" else "(Failure)") for t in self.tasks.values() if t.state in ("Completed", "Failed")]
+        
+        grid = Table.grid(expand=True, padding=(0, 2))
+        grid.add_column("Waiting", justify="left", ratio=1)
+        grid.add_column("Completed", justify="left", ratio=1)
+        
+        waiting_content = []
+        if waiting:
+            waiting_content.append(Text(f"Upcoming ({len(waiting)}):", style="bold yellow"))
+            waiting_content.append(Text("\n".join(waiting[:20]) + ("\n..." if len(waiting) > 20 else "")))
+        else:
+            waiting_content.append(Text("None", style="dim"))
+            
+        completed_content = []
+        if completed:
+            completed_content.append(Text(f"Finished ({len(completed)}):", style="bold green"))
+            completed_content.append(Text("\n".join(completed[-20:])))
+        else:
+            completed_content.append(Text("None", style="dim"))
+            
+        grid.add_row(RichGroup(*waiting_content), RichGroup(*completed_content))
+            
+        return Panel(grid, title="[bold]Task Queue", border_style="cyan")
+
+    def make_active_panel(self) -> Panel:
+        active_tasks = [t for t in self.tasks.values() if t.state not in ("Waiting", "Completed", "Failed")]
+        
+        if not active_tasks:
+            return Panel(Text("Idle", justify="center", style="dim"), title="[bold green]Active Tasks", border_style="green")
+            
+        panels = []
+        for t in active_tasks:
+            if t.state == "Resting" and t.countdown_total > 0:
+                progress_pct = ((t.countdown_total - t.countdown_current) / t.countdown_total * 100)
+                bar_width = 30
+                filled = int(bar_width * progress_pct / 100)
+                bar = "█" * filled + "░" * (bar_width - filled)
+                prog_text = f"[{bar}] Remaining {t.countdown_current}s"
+            else:
+                progress_pct = (t.completed / t.total * 100) if t.total > 0 else 0
+                bar_width = 30
+                filled = int(bar_width * progress_pct / 100)
+                bar = "█" * filled + "░" * (bar_width - filled)
+                prog_text = f"[{bar}] {progress_pct:.1f}% ({t.completed}/{t.total})"
+            
+            worker_tag = f"[Worker {t.worker_idx}] " if t.worker_idx is not None else ""
+            content = [
+                Text.from_markup(f"[bold magenta]{worker_tag}[/][bold yellow]ID: {t.comic_id}[/] | {t.title[:25]}"),
+                Text(f"Status: {t.state} - {t.msg}"),
+                Text(f"Progress: {prog_text}"),
+            ]
+            if t.logs:
+                content.append(Text("\nLatest Logs:", style="bold cyan"))
+                for log in list(t.logs)[-2:]:
+                    content.append(Text(f"› {log}", style="dim", overflow="ellipsis"))
+            
+            panels.append(Panel(RichGroup(*content), border_style="blue"))
+            
+        return Panel(RichGroup(*panels), title="[bold blue]Active Tasks", border_style="blue")
+
+    def make_footer(self) -> Panel:
+        log_text = Text()
+        for log in list(self.global_logs):
+            log_text.append("› ", style="dim")
+            log_text.append(Text.from_ansi(log.strip()))
+            log_text.append("\n")
+        return Panel(log_text, title="System Logs", border_style="magenta")
+
+    def update_layout(self):
+        self.layout["header"].update(self.make_header())
+        self.layout["left_panel"].update(self.make_queue_panel())
+        self.layout["right_panel"].update(self.make_active_panel())
+        self.layout["footer"].update(self.make_footer())
+
+
+import logging
+
+class TUIHandler(logging.Handler):
+    def __init__(self, tui: TUIManager):
+        super().__init__()
+        self.tui = tui
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.tui.log(msg)
+        except Exception:
+            self.handleError(record)
+
+
+async def cliDownload(comic_list: list[int], output_dir: str = '.', concurrency: int = 1):
     await refreshVersion()
-    for comic_id in comic_list:
-        comic = await getComic(comic_id)
-        with open(f'{comic_id}.zip', 'wb') as f:
-            await downloadComic(comic, f, max_threads=5)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+
+    tui = TUIManager(comic_list)
+    
+    # 设置日志重定向
+    tui_handler = TUIHandler(tui)
+    tui_handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(tui_handler)
+    # 完全禁用控制台输出，避免任何警告或错误打断 TUI
+    setLoggerLevel(999)
+
+    sem = asyncio.Semaphore(concurrency)
+    worker_pool = asyncio.Queue()
+    for i in range(concurrency):
+        worker_pool.put_nowait(i)
+
+    async def download_task(comic_id: int, task_index: int):
+        worker_idx = await worker_pool.get()
+        async with sem:
+            status = tui.get_task(comic_id)
+            status.worker_idx = worker_idx + 1
+            try:
+                status.update(0, "Fetching info...", state="In Progress")
+                comic = await getComic(comic_id)
+                if not comic:
+                    status.log("Fetch failed")
+                    status.update(msg="Fetch failed", state="Failed")
+                    return
+
+                status.title = comic.title
+                status.total = len(comic.files)
+                status.update(0, "Decoding URLs...")
+
+                # 过滤非法字符
+                safe_title = re.sub(r'[\\/:*?"<>|]', '_', comic.title)
+                save_path = os.path.join(output_dir, f'{safe_title}.zip')
+
+                async def progress_cb(url: str):
+                    status.completed += 1
+
+                status.update(0, "Downloading...")
+                with open(save_path, 'wb') as f:
+                    success = await downloadComic(comic, f, max_threads=5, phase_callback=progress_cb)
+
+                if success:
+                    if task_index < len(comic_list) - 1:
+                        sleep_time = random.randint(10, 30)
+                        status.countdown_total = sleep_time
+                        for s in range(sleep_time, 0, -1):
+                            status.countdown_current = s
+                            status.update(msg=f"Next task soon", state="Resting")
+                            await asyncio.sleep(1)
+                    status.update(status.total, "Completed", state="Completed")
+                else:
+                    status.log("Download failed")
+                    status.update(msg="Download failed", state="Failed")
+            except Exception as e:
+                logger.error(f"Task exception: {e}")
+                status.update(msg=f"Exception: {e}", state="Failed")
+            finally:
+                status.worker_idx = None
+                worker_pool.put_nowait(worker_idx)
+
+    async def ui_updater():
+        while True:
+            tui.update_layout()
+            await asyncio.sleep(0.1)
+
+    try:
+        tui.update_layout()
+        with Live(tui.layout, console=tui.console, refresh_per_second=10, screen=True):
+            ui_task = asyncio.create_task(ui_updater())
+            tasks = [download_task(comic_id, i) for i, comic_id in enumerate(comic_list)]
+            await asyncio.gather(*tasks)
+            ui_task.cancel()
+            tui.update_layout() # Final render
+    finally:
+        # 恢复日志级别
+        setLoggerLevel(logging.INFO)
+        logger.removeHandler(tui_handler)
 
 
 async def cliSearch(search_string: str):
@@ -675,23 +932,33 @@ if __name__ == '__main__':
     parser.add_argument('-p', '--proxy',
                         dest='proxy',
                         type=str,
-                        help='设置代理')
+                        help='Set proxy')
     arg_group = parser.add_mutually_exclusive_group(required=True)
     arg_group.add_argument('-d', '--download',
                            dest="comic_ids",
                            type=int,
                            nargs='+',
-                           help='下载comic')
+                           help='Download comic')
     arg_group.add_argument('-s', '--search',
                            dest='search_str',
                            type=str,
-                           help='搜索comic')
+                           help='Search comic')
+    parser.add_argument('-o', '--output',
+                        dest='output_dir',
+                        type=str,
+                        default='../../Downloads/',
+                        help='Set storage path (default: current dir)')
+    parser.add_argument('-c', '--concurrency',
+                        dest='concurrency',
+                        type=int,
+                        default=1,
+                        help='Set concurrency (default: 1)')
     args = parser.parse_args()
     if args.proxy:
-        logger.info(f'正在使用代理: {args.proxy}')
+        logger.info(f'Using proxy: {args.proxy}')
         setProxy(args.proxy)
     asyncio.run(refreshVersion())
     if args.comic_ids:
-        asyncio.run(cliDownload(args.comic_ids))
+        asyncio.run(cliDownload(args.comic_ids, args.output_dir, args.concurrency))
     else:
         asyncio.run(cliSearch(args.search_str))

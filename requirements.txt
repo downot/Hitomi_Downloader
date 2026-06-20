@@ -3,3 +3,4 @@ colorlog
 tqdm
 httpx[http2]
 pydantic
+rich

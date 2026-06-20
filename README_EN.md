@@ -18,46 +18,43 @@ Based on the reverse-engineered JS code of the website's client.
 
 - Supports proxies
 - Retry mechanism
+- **Multi-task Concurrent Download**: Supports starting multiple download tasks simultaneously to improve efficiency.
+- **Random Rest Time**: Automatically rests for 10-30 seconds between tasks to reduce the risk of being banned.
+- **Batch Download**: Supports inputting multiple IDs at once for downloading.
 
-## Usage
+Run `hitomiv2.py` directly to search or download.
 
-```python
-from hitomiv2 import Hitomi
+### 1. Download Comic
 
-# You can add a proxy, in the format of the requests library, it will be applied globally
-proxy = {
-    'http': 'http://127.0.0.1:10809',
-    'https': 'http://127.0.0.1:10809'
-}
-hitomi = Hitomi(proxy_settings=proxy)
+Supports downloading multiple IDs simultaneously and setting the concurrency level:
 
-# Search
-query_str = 'HayaseYuuka'
-results: list = hitomi.query(query_str)
-# Download
-target_gallery = results[0]
-filename = target_gallery.download(max_threads=5)
-if filename:
-    print(f'{filename} download completed')
-else:
-    print('Non-existent ID')
+```bash
+# Download a single ID
+python hitomiv2.py -d 123456
+
+# Download multiple IDs with a concurrency of 3
+python hitomiv2.py -d 123456 789012 345678 -c 3
+
+# Set the output directory
+python hitomiv2.py -d 123456 -o ./my_comics
 ```
 
-## Parameter Explanation
+### 2. Search Comic
 
-- `Hitomi` class
-    - `storage_path_fmt`: Used to specify the download path. The downloaded comics will be stored in this path as compressed files, with the default being the working directory.
-    - `proxy_settings`: Used to pass proxy settings, in the format mentioned above.
-    - `debug_fmt`: Debug mode, default is False. If you think the script isn't working as expected, set it to True to view debug information. Please include the debug logs when submitting an issue.
+```bash
+# Search by keyword
+python hitomiv2.py -s "HayaseYuuka"
+```
 
-- `hitomi.query` function
-    - `query_string`: The search keyword, a string variable.
-    - `origin_result`: Defaults to False, which only returns Chinese results. Set to True to get fully keyword-based results.
-    - The returned result is a list containing instances of the Comic class. If no results or an error occurs, an empty list is returned.
+### Parameter Explanation
 
-- `Comic.download` function
-    - `max_threads`: Maximum number of threads, default is 1 (no multithreading).
-    - Returns the downloaded filename, or an empty string if the download fails.
+- `-d`, `--download`: Download specified Comic IDs, supports multiple IDs (space-separated).
+- `-s`, `--search`: Search keywords.
+- `-c`, `--concurrency`: Number of concurrent download tasks, default is 1 (sequential).
+- `-o`, `--output`: Set the storage path for downloaded files.
+- `-p`, `--proxy`: Set proxy address (e.g., `http://127.0.0.1:10809`).
+
+
 
 ## Notes
 
